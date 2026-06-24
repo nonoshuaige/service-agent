@@ -6,7 +6,7 @@ class Settings(BaseSettings):
     # LLM
     zhipu_api_key: str = ""
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4/"
-    zhipu_model: str = "glm-4-flash"
+    zhipu_model: str = "GLM-4.6V"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1/"
     deepseek_model: str = "deepseek-chat"

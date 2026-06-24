@@ -91,3 +91,26 @@ async def get_session_detail(session_id: str) -> dict | None:
         "agent_type": meta.get("agent_type", "general"),
         "created_at": meta.get("created_at", ""),
     }
+
+
+async def rename_session(session_id: str, title: str):
+    """Rename a session's title."""
+    redis = await get_redis()
+    await redis.hset(_session_meta_key(session_id), "title", title)
+
+
+def _active_session_key(user_id: str) -> str:
+    return f"agent:active_session:{user_id}"
+
+
+async def get_active_session(user_id: str) -> str | None:
+    """Get the user's last active session ID."""
+    redis = await get_redis()
+    sid = await redis.get(_active_session_key(user_id))
+    return sid or None
+
+
+async def set_active_session(user_id: str, session_id: str):
+    """Remember which session the user is currently viewing."""
+    redis = await get_redis()
+    await redis.set(_active_session_key(user_id), session_id)

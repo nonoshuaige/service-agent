@@ -21,9 +21,10 @@ FastAPI Agent 后端 (localhost:8000)
     │  POST /api/v1/agent/sessions
     │
     ├── JWT 验证 → 提取 userId → ContextVar 存储 token
-    ├── LLM 调用 (智谱 GLM-4 / DeepSeek)
+    ├── LLM 调用 (智谱 GLM-4.6V / DeepSeek)
     ├── 工具执行 → 转发 JWT 到后端
-    └── Redis 上下文存储
+    ├── Redis 上下文存储 + 活跃会话追踪
+    └── 会话重命名 + 自动恢复上次对话
     │
     ▼
 Spring Boot 后端 (localhost:8080)
@@ -86,9 +87,10 @@ curl -X POST http://localhost:8000/api/v1/agent/chat/stream \
 |------|------|------|
 | GET | `/health` | 健康检查 |
 | POST | `/api/v1/agent/sessions` | 创建会话 |
-| GET | `/api/v1/agent/sessions` | 会话列表 |
+| GET | `/api/v1/agent/sessions` | 会话列表（含 active_session_id） |
+| PATCH | `/api/v1/agent/sessions/{id}` | 重命名会话 |
 | DELETE | `/api/v1/agent/sessions/{id}` | 删除会话 |
-| GET | `/api/v1/agent/sessions/{id}` | 会话详情 |
+| GET | `/api/v1/agent/sessions/{id}` | 会话详情（含历史消息） |
 | POST | `/api/v1/agent/chat/stream` | SSE 流式对话 |
 
 ## SSE 事件类型

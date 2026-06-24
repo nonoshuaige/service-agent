@@ -2,7 +2,7 @@ import json
 import uuid
 import logging
 import traceback
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from starlette.responses import StreamingResponse
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -17,6 +17,9 @@ from agent_backend.context.context_hub import (
     load_context,
     save_turn,
     update_session_meta,
+    rename_session,
+    get_active_session,
+    set_active_session,
 )
 from agent_backend.context.recent_chat import get_recent
 from agent_backend.agent.nodes import create_llm
@@ -32,6 +35,7 @@ router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 async def create_session(req: CreateSessionReq, user_id: str = Depends(get_current_user_id)):
     session_id = "sess_" + uuid.uuid4().hex[:12]
     await create_session_meta(user_id, session_id, req.agent_type, req.title or "")
+    await set_active_session(user_id, session_id)
     detail = await get_session_detail(session_id)
     return ApiResponse.success(data=detail)
 
@@ -39,13 +43,32 @@ async def create_session(req: CreateSessionReq, user_id: str = Depends(get_curre
 @router.get("/sessions")
 async def list_user_sessions(user_id: str = Depends(get_current_user_id)):
     sessions = await list_sessions(user_id)
-    return ApiResponse.success(data={"sessions": sessions})
+    active_id = await get_active_session(user_id)
+    return ApiResponse.success(data={"sessions": sessions, "active_session_id": active_id})
 
 
 @router.delete("/sessions/{session_id}")
 async def remove_session(session_id: str, user_id: str = Depends(get_current_user_id)):
     await delete_session(user_id, session_id)
+    # Clear active session pointer if the deleted session was active
+    active_id = await get_active_session(user_id)
+    if active_id == session_id:
+        await set_active_session(user_id, "")
     return ApiResponse.success(msg="Session deleted")
+
+
+@router.patch("/sessions/{session_id}")
+async def rename_session_endpoint(
+    session_id: str,
+    body: dict = Body(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Rename a session. Body: { "title": "new name" }"""
+    title = body.get("title", "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title is required")
+    await rename_session(session_id, title)
+    return ApiResponse.success(msg="Renamed")
 
 
 @router.get("/sessions/{session_id}")
@@ -55,6 +78,8 @@ async def session_detail(session_id: str, user_id: str = Depends(get_current_use
         raise HTTPException(status_code=404, detail="Session not found")
     recent = await get_recent(user_id, session_id)
     detail["messages"] = recent
+    # Remember this as the active session
+    await set_active_session(user_id, session_id)
     return ApiResponse.success(data=detail)
 
 
@@ -63,7 +88,9 @@ async def chat_stream(req: ChatStreamReq, user_id: str = Depends(get_current_use
     session_id = req.session_id
     if not session_id:
         session_id = "sess_" + uuid.uuid4().hex[:12]
-        await create_session_meta(user_id, session_id, req.agent_type, "")
+        await create_session_meta(user_id, session_id, req.agent_type, req.message[:20])
+
+    await set_active_session(user_id, session_id)
 
     tools = get_agent_tools(req.agent_type)
     llm = create_llm()
