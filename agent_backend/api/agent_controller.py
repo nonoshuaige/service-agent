@@ -20,8 +20,10 @@ from agent_backend.context.context_hub import (
     rename_session,
     get_active_session,
     set_active_session,
+    load_session_messages,
+    load_messages_before,
 )
-from agent_backend.context.recent_chat import get_recent
+from agent_backend.context.recent_chat import get_messages_since
 from agent_backend.agent.nodes import create_llm
 from agent_backend.tools.registry import get_agent_tools
 from agent_backend.utils.sse import sse_event
@@ -76,11 +78,28 @@ async def session_detail(session_id: str, user_id: str = Depends(get_current_use
     detail = await get_session_detail(session_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Session not found")
-    recent = await get_recent(user_id, session_id)
-    detail["messages"] = recent
+    # Load only recent messages initially
+    data = await load_session_messages(session_id)
+    detail.update(data)
     # Remember this as the active session
     await set_active_session(user_id, session_id)
     return ApiResponse.success(data=detail)
+
+
+@router.get("/sessions/{session_id}/messages")
+async def session_messages(
+    session_id: str,
+    before_seq: int = 0,
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Load older messages before a given sequence number (cursor pagination)."""
+    # Verify session exists
+    detail = await get_session_detail(session_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Session not found")
+    data = await load_messages_before(session_id, before_seq, limit)
+    return ApiResponse.success(data=data)
 
 
 @router.post("/chat/stream")
@@ -102,8 +121,7 @@ async def chat_stream(req: ChatStreamReq, user_id: str = Depends(get_current_use
 
             tools_desc = "\n".join(f"- {t.name}: {t.description}" for t in tools) if tools else ""
             system_prompt = build_system_prompt(
-                long_term=context.get("long_term", {}),
-                summary=context.get("summary", ""),
+                compression=context.get("compression", ""),
                 tools_desc=tools_desc,
             )
             recent_msgs = context.get("recent", [])

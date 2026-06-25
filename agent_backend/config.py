@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # Service
     agent_port: int = 8000
 
+    # Database
+    db_path: str = "agent.db"
+
     # External
     ticket_backend_url: str = "http://localhost:8080"
 

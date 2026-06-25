@@ -39,8 +39,7 @@ async def agent_node(state: AgentState) -> AgentState:
 
     tools_desc = "\n".join(f"- {t.name}: {t.description}" for t in tools) if tools else ""
     system_prompt = build_system_prompt(
-        long_term={},
-        summary="",
+        compression="",
         tools_desc=tools_desc,
     )
 

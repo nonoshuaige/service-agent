@@ -41,6 +41,11 @@ logs/
 # ========== Claude Code ==========
 .claude/
 
+# ========== Database ==========
+*.db
+*.db-journal
+*.db-wal
+
 # ========== Misc ==========
 tmp/
 temp/

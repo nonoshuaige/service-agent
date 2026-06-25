@@ -14,9 +14,17 @@ async def lifespan(app: FastAPI):
     redis = await get_redis()
     await redis.ping()
     logging.info("Redis connected successfully")
+
+    from agent_backend.storage.db import init_db
+    await init_db()
+    logging.info("SQLite initialized successfully")
+
     yield
+
     await close_redis()
-    logging.info("Redis connection closed")
+    from agent_backend.storage.db import close_db
+    await close_db()
+    logging.info("Redis + SQLite connections closed")
 
 
 app = FastAPI(title="Agent Intelligent Assistant", version="1.0.0", lifespan=lifespan)

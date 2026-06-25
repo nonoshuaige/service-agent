@@ -1,11 +1,7 @@
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 
-def build_system_prompt(
-    long_term: dict,
-    summary: str,
-    tools_desc: str,
-) -> str:
+def build_system_prompt(compression: str, tools_desc: str) -> str:
     """Build the system prompt with prefix-cache-friendly layout."""
     parts = [
         "你是校园活动票务智能助手，帮助用户查询活动、订票、查订单等。请用中文回复。",
@@ -24,11 +20,8 @@ def build_system_prompt(
         "只有当用户明确提到了具体活动名称（如「毕业晚会」「十佳歌手」）时，才用这些词做 keyword。",
     ]
 
-    if long_term:
-        prefs = "\n".join(f"- {k}: {v}" for k, v in long_term.items())
-        parts.append(f"\n## 用户偏好\n{prefs}")
-
-    parts.append(f"\n## 对话摘要\n{summary or '新对话'}")
+    if compression:
+        parts.append(f"\n## 对话历史摘要\n{compression}")
 
     if tools_desc:
         parts.append(f"\n## 可用工具\n{tools_desc}")
@@ -36,18 +29,19 @@ def build_system_prompt(
     return "\n".join(parts)
 
 
-def build_messages(
-    system_prompt: str,
-    recent_messages: list[dict],
-    user_query: str,
-) -> list:
+def build_messages(system_prompt: str, recent_messages: list[dict],
+                   user_query: str) -> list:
     messages = [SystemMessage(content=system_prompt)]
 
     for m in recent_messages:
-        if m["role"] == "user":
+        role = m.get("role", "")
+        if role == "user":
             messages.append(HumanMessage(content=m["content"]))
-        elif m["role"] == "assistant":
+        elif role == "assistant":
             messages.append(AIMessage(content=m["content"]))
+        elif role == "system":
+            # Compression summary injected as context
+            messages.append(HumanMessage(content=m["content"]))
 
     messages.append(HumanMessage(content=user_query))
     return messages
