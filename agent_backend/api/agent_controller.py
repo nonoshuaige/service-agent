@@ -4,11 +4,13 @@ import logging
 import traceback
 from fastapi import APIRouter, Depends, HTTPException, Body
 from starlette.responses import StreamingResponse
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 
 from agent_backend.api.deps import get_current_user_id
 from agent_backend.models.request import CreateSessionReq, ChatStreamReq
 from agent_backend.models.response import ApiResponse
+from agent_backend.agent.state import MultiAgentState
+from agent_backend.agent.graph import build_multi_agent_graph
 from agent_backend.context.context_hub import (
     create_session_meta,
     list_sessions,
@@ -23,20 +25,31 @@ from agent_backend.context.context_hub import (
     load_session_messages,
     load_messages_before,
 )
-from agent_backend.context.recent_chat import get_messages_since
-from agent_backend.agent.nodes import create_llm
-from agent_backend.tools.registry import get_agent_tools
 from agent_backend.utils.sse import sse_event
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agent", tags=["agent"])
 
+# ── Graph singleton (compiled once, stateless) ───────────────
+
+_graph = None
+
+
+def _get_graph():
+    global _graph
+    if _graph is None:
+        _graph = build_multi_agent_graph()
+    return _graph
+
+
+# ── Session CRUD (unchanged) ──────────────────────────────────
 
 @router.post("/sessions")
 async def create_session(req: CreateSessionReq, user_id: str = Depends(get_current_user_id)):
     session_id = "sess_" + uuid.uuid4().hex[:12]
-    await create_session_meta(user_id, session_id, req.agent_type, req.title or "")
+    agent_type = req.agent_type or "auto"
+    await create_session_meta(user_id, session_id, agent_type, req.title or "")
     await set_active_session(user_id, session_id)
     detail = await get_session_detail(session_id)
     return ApiResponse.success(data=detail)
@@ -52,7 +65,6 @@ async def list_user_sessions(user_id: str = Depends(get_current_user_id)):
 @router.delete("/sessions/{session_id}")
 async def remove_session(session_id: str, user_id: str = Depends(get_current_user_id)):
     await delete_session(user_id, session_id)
-    # Clear active session pointer if the deleted session was active
     active_id = await get_active_session(user_id)
     if active_id == session_id:
         await set_active_session(user_id, "")
@@ -65,7 +77,6 @@ async def rename_session_endpoint(
     body: dict = Body(...),
     user_id: str = Depends(get_current_user_id),
 ):
-    """Rename a session. Body: { "title": "new name" }"""
     title = body.get("title", "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Title is required")
@@ -78,10 +89,8 @@ async def session_detail(session_id: str, user_id: str = Depends(get_current_use
     detail = await get_session_detail(session_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Session not found")
-    # Load only recent messages initially
     data = await load_session_messages(session_id)
     detail.update(data)
-    # Remember this as the active session
     await set_active_session(user_id, session_id)
     return ApiResponse.success(data=detail)
 
@@ -93,8 +102,6 @@ async def session_messages(
     limit: int = 20,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Load older messages before a given sequence number (cursor pagination)."""
-    # Verify session exists
     detail = await get_session_detail(session_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -102,92 +109,138 @@ async def session_messages(
     return ApiResponse.success(data=data)
 
 
+# ── SSE Chat (rewired to graph) ───────────────────────────────
+
 @router.post("/chat/stream")
 async def chat_stream(req: ChatStreamReq, user_id: str = Depends(get_current_user_id)):
     session_id = req.session_id
     if not session_id:
         session_id = "sess_" + uuid.uuid4().hex[:12]
-        await create_session_meta(user_id, session_id, req.agent_type, req.message[:20])
+        await create_session_meta(user_id, session_id, req.agent_type or "auto", req.message[:20])
 
     await set_active_session(user_id, session_id)
 
-    tools = get_agent_tools(req.agent_type)
-    llm = create_llm()
+    # Load existing context (compression + recent messages)
     context = await load_context(user_id, session_id)
 
     async def event_generator():
         try:
-            from agent_backend.agent.prompt_builder import build_system_prompt, build_messages
+            # ── Build initial state for the graph ──
+            initial_messages = []
 
-            tools_desc = "\n".join(f"- {t.name}: {t.description}" for t in tools) if tools else ""
-            system_prompt = build_system_prompt(
-                compression=context.get("compression", ""),
-                tools_desc=tools_desc,
-            )
-            recent_msgs = context.get("recent", [])
-            messages = build_messages(system_prompt, recent_msgs, req.message)
+            # Compression summary as context
+            if context.get("compression"):
+                initial_messages.append(HumanMessage(
+                    content=f"[对话历史摘要]\n{context['compression']}"
+                ))
 
-            yield sse_event("thinking", {"step": 1, "content": "正在分析你的问题..."})
+            # Recent messages from Redis
+            for m in context.get("recent", []):
+                role = m.get("role", "")
+                if role == "user":
+                    initial_messages.append(HumanMessage(content=m["content"]))
+                elif role == "assistant":
+                    initial_messages.append(AIMessage(content=m["content"]))
+                elif role == "system":
+                    initial_messages.append(HumanMessage(content=m["content"]))
 
-            if tools:
-                llm_with_tools = llm.bind_tools(tools)
-            else:
-                llm_with_tools = llm
+            # Current user message
+            initial_messages.append(HumanMessage(content=req.message))
 
-            # Use ainvoke (non-streaming) for reliable tool-call detection.
-            # Streaming chunks do not reliably carry complete tool_calls across
-            # all OpenAI-compatible providers (Zhipu, DeepSeek, etc.).
-            response = await llm_with_tools.ainvoke(messages)
+            initial_state: MultiAgentState = {
+                "messages": initial_messages,
+                "user_id": user_id,
+                "session_id": session_id,
+                "user_query": req.message,
+                "rewritten_query": "",
+                "intent": "",
+                "intent_reason": "",
+                "next_agent": "",
+                "supervisor_reason": "",
+                "handoff_to": "",
+                "handoff_reason": "",
+                "handoff_from": "",
+                "current_agent": "",
+                "step_count": 0,
+                "handoff_count": 0,
+                "is_final": False,
+            }
 
-            if hasattr(response, "tool_calls") and response.tool_calls:
-                # Append the full AI response (with all tool_calls) once
-                messages.append(response)
+            yield sse_event("thinking", {"step": "start", "content": "正在分析你的问题..."})
 
-                for tc in response.tool_calls:
-                    tool_name = tc.get("name", "unknown")
-                    tool_args = tc.get("args", {})
-                    tool_call_id = tc.get("id", "")
+            graph = _get_graph()
+            config = {"configurable": {"thread_id": session_id}}
+            final_text = ""
+            final_agent = "chitchat"
 
-                    yield sse_event("tool_call", {
-                        "tool": tool_name,
-                        "input": tool_args,
-                        "status": "running",
+            async for chunk in graph.astream(initial_state, config, stream_mode="updates"):
+                node_name = next(iter(chunk))
+                update = chunk[node_name]
+
+                if node_name == "rewrite_intent":
+                    intent = update.get("intent", "unknown")
+                    rewritten = update.get("rewritten_query", "")
+                    yield sse_event("thinking", {
+                        "step": "intent",
+                        "content": f"识别意图: {intent}",
+                        "intent": intent,
+                        "rewritten_query": rewritten,
                     })
 
-                    try:
-                        tool_func = next((t for t in tools if t.name == tool_name), None)
-                        if tool_func:
-                            result = await tool_func.ainvoke(tool_args)
-                            result_str = str(result)
-                        else:
-                            result_str = f"Tool {tool_name} not found"
-                    except Exception as e:
-                        result_str = f"Tool execution error: {str(e)}"
-
-                    yield sse_event("tool_result", {
-                        "tool": tool_name,
-                        "output": result_str,
+                elif node_name == "supervisor":
+                    next_agent = update.get("next_agent", "unknown")
+                    yield sse_event("thinking", {
+                        "step": "route",
+                        "content": f"调度到: {next_agent}",
                     })
 
-                    messages.append(ToolMessage(content=result_str, tool_call_id=tool_call_id))
+                elif node_name in ("chitchat_agent", "pre_sales_agent", "after_sales_agent"):
+                    final_agent = node_name.replace("_agent", "")
+                    new_msgs = update.get("messages", [])
 
-                yield sse_event("thinking", {"step": 2, "content": "正在整理结果..."})
+                    for msg in new_msgs:
+                        if isinstance(msg, AIMessage):
+                            tc = getattr(msg, "tool_calls", None)
+                            if tc:
+                                for t in tc:
+                                    yield sse_event("tool_call", {
+                                        "tool": t.get("name", "unknown"),
+                                        "input": t.get("args", {}),
+                                        "status": "running",
+                                    })
+                            if msg.content:
+                                final_text = str(msg.content)
+                        elif isinstance(msg, ToolMessage):
+                            yield sse_event("tool_result", {
+                                "tool": getattr(msg, "tool_call_id", ""),
+                                "output": str(msg.content),
+                            })
 
-                final_response = await llm.ainvoke(messages)
-                full_response = str(final_response.content) if final_response.content else ""
-                yield sse_event("final", {"content": full_response, "session_id": session_id})
-            else:
-                full_response = str(response.content) if response.content else ""
-                yield sse_event("final", {"content": full_response, "session_id": session_id})
+            # Emit final text
+            if final_text:
+                yield sse_event("final", {"content": final_text, "session_id": session_id})
 
-            await save_turn(user_id, session_id, req.message, full_response[:500])
-            await update_session_meta(session_id, full_response[:100])
+            # Persist the turn
+            await save_turn(user_id, session_id, req.message, final_text[:500])
+            await update_session_meta(session_id, final_text[:100] or req.message[:100])
+            # Update agent_type in session meta to reflect actual classification
+            await _set_session_agent_type(session_id, final_agent)
 
             yield sse_event("done", {})
 
         except Exception as e:
-            logger.error(f"Stream error: {traceback.format_exc()}")
+            logger.error(f"Graph stream error: {traceback.format_exc()}")
             yield sse_event("error", {"message": f"处理请求时出错: {str(e)}"})
             yield sse_event("done", {})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+async def _set_session_agent_type(session_id: str, agent_type: str):
+    """Update the session meta to reflect the classified agent type."""
+    from agent_backend.utils.redis_client import get_redis
+    try:
+        redis = await get_redis()
+        await redis.hset(f"agent:session:{session_id}", "agent_type", agent_type)
+    except Exception:
+        pass

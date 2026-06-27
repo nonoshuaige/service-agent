@@ -1,16 +1,18 @@
-import os
+"""LLM factory — creates ChatOpenAI instances for Zhipu / DeepSeek.
+
+The old agent_node is DEPRECATED since v1.5 (supervisor-based multi-agent).
+Real agent logic now lives in agent/sub_agents/ via _run_agent_loop.
+"""
+
 import logging
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage
-from agent_backend.agent.state import AgentState
-from agent_backend.agent.prompt_builder import build_system_prompt, build_messages
-from agent_backend.tools.registry import get_agent_tools
 from agent_backend.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def create_llm(provider: str | None = None) -> ChatOpenAI:
+    """Create a ChatOpenAI instance for the configured or given provider."""
     provider = provider or settings.llm_provider
 
     if provider == "zhipu":
@@ -33,7 +35,16 @@ def create_llm(provider: str | None = None) -> ChatOpenAI:
         raise ValueError(f"Unknown LLM provider: {provider}")
 
 
-async def agent_node(state: AgentState) -> AgentState:
+# ── Legacy agent_node (deprecated, not used by supervisor graph) ──
+
+async def agent_node(state: "AgentState") -> "AgentState":
+    """DEPRECATED since v1.5. Kept for reference only.
+    Use agent/sub_agents/* via the supervisor graph instead.
+    """
+    from agent_backend.agent.state import AgentState
+    from agent_backend.agent.prompt_builder import build_system_prompt, build_messages
+    from agent_backend.tools.registry import get_agent_tools
+
     llm = create_llm()
     tools = get_agent_tools(state.get("agent_type", "general"))
 
@@ -43,7 +54,6 @@ async def agent_node(state: AgentState) -> AgentState:
         tools_desc=tools_desc,
     )
 
-    # Reconstruct recent messages from state (exclude system messages)
     all_messages = list(state["messages"])
     recent = []
     for m in all_messages[-20:]:
@@ -53,7 +63,6 @@ async def agent_node(state: AgentState) -> AgentState:
             elif m.type == "ai":
                 recent.append({"role": "assistant", "content": m.content})
 
-    # Get the last user message as query
     user_query = ""
     for m in reversed(all_messages):
         if hasattr(m, "type") and m.type == "human":
@@ -62,14 +71,12 @@ async def agent_node(state: AgentState) -> AgentState:
 
     messages = build_messages(system_prompt, recent[:-1] if recent else [], user_query)
 
-    # Bind tools if available
     if tools:
         llm_with_tools = llm.bind_tools(tools)
     else:
         llm_with_tools = llm
 
     response = await llm_with_tools.ainvoke(messages)
-
     new_step = state.get("step_count", 0) + 1
     has_tool_calls = bool(getattr(response, "tool_calls", None))
 

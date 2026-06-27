@@ -1,18 +1,20 @@
 # Service Agent
 
-校园活动票务智能助手，基于 FastAPI + LangChain + Redis + SQLite 的 AI Agent 对话系统。
+校园活动票务智能助手，基于 FastAPI + LangGraph Supervisor + Redis + SQLite 的多 Agent 对话系统。
 
-> 版本：v1.4 | 最后更新：2026-06-25
+> 版本：v1.5 | 最后更新：2026-06-27
 
 ## 概述
 
-在现有校园活动票务系统（Spring Boot + Vue 3）基础上，提供智能对话能力。Agent 能够：
-- 调用工具查询活动、订单、执行计算
-- Redis 热数据缓存 + SQLite 全量持久化的双层存储
-- 滑动窗口消息压缩（recent 满 20 条 → 异步 LLM 摘要）
-- 通过 SSE 流式推送思考过程和回复
-- 将用户 JWT 全链路传递到 Spring Boot 后端
-- 上下滑分页加载（recent 优先展示 + 上滑穿透 DB）
+在现有校园活动票务系统（Spring Boot + Vue 3）基础上，基于 LangGraph StateGraph 构建 **Supervisor 多 Agent 架构**：
+
+- **意图识别** — LLM 改写查询 + 自动分类意图（闲聊 / 售前 / 售后）
+- **Supervisor 路由** — LLM 调度器决定由哪个子 Agent 处理
+- **售前 Agent** — 搜索活动、购票下单、计算器
+- **售后 Agent** — 查询订单、票务政策FAQ、计算器
+- **Handoff 跨Agent协作** — 子Agent互相感知，可传递任务（回环保护）
+- **双层存储** — Redis 热数据缓存 + SQLite 全量持久化
+- **SSE 流式推送** — thinking / intent / route / tool_call / tool_result / final / done
 
 ## 架构
 
@@ -21,15 +23,13 @@ Vue 3 前端 (localhost:5173)
     │  Authorization: Bearer <JWT>
     ▼
 FastAPI Agent 后端 (localhost:8000)
-    │  POST /api/v1/agent/chat/stream  (SSE)
-    │  POST /api/v1/agent/sessions
     │
-    ├── JWT 验证 → 提取 userId → ContextVar 存储 token
-    ├── LLM 调用 (智谱 GLM-4.6V / DeepSeek)
-    ├── 工具执行 → 转发 JWT 到后端
-    ├── Redis 热数据缓存 (全 Key 7 天 TTL) + SQLite 全量持久化
-    ├── 滑动窗口压缩 (recent 满 20 → 异步 LLM 摘要)
-    └── 会话重命名 + 自动恢复上次对话 + 上滑分页加载
+    ├── rewrite_intent → supervisor → chitchat | pre_sales | after_sales
+    │                                    │   handoff   │
+    │                                    └─────────────┘
+    ├── JWT 验证 → ContextVar → 工具层转发到 Spring Boot
+    ├── Redis 热数据 (7天TTL) + SQLite 全量持久化
+    └── SSE 流式输出
     │
     ▼
 Spring Boot 后端 (localhost:8080)
@@ -42,7 +42,7 @@ Spring Boot 后端 (localhost:8080)
 - Python 3.11+
 - Redis（Docker 容器）
 - 可访问的 LLM API（智谱 / DeepSeek）
-- 运行中的 Spring Boot 后端（活动/订单/用户 API）
+- 运行中的 Spring Boot 后端（活动/订单 API）
 
 ### 安装
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 ### 配置
 
-复制并编辑 `.env` 文件，填入 API Key 和 JWT Secret：
+复制并编辑 `.env` 文件：
 
 ```env
 LLM_PROVIDER=zhipu
@@ -80,11 +80,11 @@ curl -X POST http://localhost:8080/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"phone":"13800138000","password":"123456"}'
 
-# 流式对话
+# 流式对话（意图自动识别，agent_type 已废弃）
 curl -X POST http://localhost:8000/api/v1/agent/chat/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
-  -d '{"agent_type": "ticket", "message": "帮我查一下有什么活动"}'
+  -d '{"message": "帮我查一下有什么活动"}'
 ```
 
 ## API 端点
@@ -96,35 +96,56 @@ curl -X POST http://localhost:8000/api/v1/agent/chat/stream \
 | GET | `/api/v1/agent/sessions` | 会话列表（含 active_session_id） |
 | PATCH | `/api/v1/agent/sessions/{id}` | 重命名会话 |
 | DELETE | `/api/v1/agent/sessions/{id}` | 删除会话 |
-| GET | `/api/v1/agent/sessions/{id}` | 会话详情（最近 20 条 + has_more 分页） |
+| GET | `/api/v1/agent/sessions/{id}` | 会话详情（最近 20 条 + has_more） |
 | GET | `/api/v1/agent/sessions/{id}/messages?before_seq=N` | 游标分页加载更早消息 |
-| POST | `/api/v1/agent/chat/stream` | SSE 流式对话 |
+| POST | `/api/v1/agent/chat/stream` | SSE 流式对话（意图自动识别） |
 
 ## SSE 事件类型
 
 | 事件 | 含义 |
 |------|------|
-| `thinking` | 正在分析/推理 |
-| `tool_call` | 调用工具 |
+| `thinking` (start) | 开始处理 |
+| `thinking` (intent) | 意图识别结果：chitchat / pre_sales / after_sales |
+| `thinking` (route) | 路由调度结果 |
+| `tool_call` | 子Agent调用工具 |
 | `tool_result` | 工具返回结果 |
 | `final` | 最终回复 |
 | `error` | 错误信息 |
 | `done` | 流结束 |
 
+## 多 Agent 工具分配
+
+| Agent | 工具 |
+|-------|------|
+| chitchat（闲聊） | 无 |
+| pre_sales（售前） | search_events, create_order, calculator |
+| after_sales（售后） | query_my_orders, calculator |
+
 ## 项目结构
 
 ```
 agent_backend/
-├── main.py              # FastAPI 入口 + lifespan Redis/DB 初始化
-├── config.py            # 配置管理
-├── api/                 # HTTP 层（路由 + 依赖注入 + 消息分页）
-├── auth/                # JWT 验证 + token 传播
-├── agent/               # LLM 工厂 + Prompt 构建 + LangGraph 预留
-├── tools/               # 工具定义（票务/通用）+ 注册表
-├── storage/             # SQLite 持久化层（消息 + 压缩记录 CRUD）
-├── context/             # 上下文中心（Redis 热数据 + 滑动窗口压缩）
-├── models/              # Pydantic 请求/响应模型
-└── utils/               # Redis 客户端 + SSE 工具
+├── main.py                  # FastAPI 入口 + lifespan
+├── config.py                # 配置管理
+├── api/                     # HTTP 层（路由 + JWT 依赖注入）
+├── auth/                    # JWT 验证 + token 传播
+├── agent/                   # Supervisor 多 Agent 核心
+│   ├── state.py             # MultiAgentState 定义
+│   ├── graph.py             # LangGraph StateGraph 编排
+│   ├── nodes.py             # LLM 工厂
+│   ├── prompts.py           # System Prompt 模板
+│   ├── intents.py           # 意图识别节点
+│   ├── supervisor.py        # LLM 路由调度节点
+│   ├── handoff.py           # handoff 工具 + router
+│   └── sub_agents/          # 子Agent实现
+│       ├── chitchat.py      # 闲聊 Agent
+│       ├── pre_sales.py     # 售前 Agent
+│       └── after_sales.py   # 售后 Agent
+├── tools/                   # 工具定义 + 注册表
+├── storage/                 # SQLite 持久化层
+├── context/                 # Redis 上下文中心
+├── models/                  # Pydantic 请求/响应模型
+└── utils/                   # Redis 客户端 + SSE 工具
 ```
 
 ## 技术栈
@@ -132,8 +153,8 @@ agent_backend/
 | 组件 | 用途 |
 |------|------|
 | FastAPI | Web 框架 |
+| LangGraph | Supervisor 多 Agent 编排 |
 | LangChain + langchain-openai | LLM 抽象 + 工具定义 |
-| LangGraph | 状态机编排（预留） |
 | Redis | 热数据缓存（全 Key 7 天 TTL） |
 | SQLite (aiosqlite) | 全量消息持久化 + 压缩记录 |
 | SSE | 流式推送 |
