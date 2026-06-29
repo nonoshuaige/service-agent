@@ -17,14 +17,14 @@ async def lifespan(app: FastAPI):
 
     from agent_backend.storage.db import init_db
     await init_db()
-    logging.info("SQLite initialized successfully")
+    logging.info("MySQL initialized successfully")
 
     yield
 
     await close_redis()
     from agent_backend.storage.db import close_db
     await close_db()
-    logging.info("Redis + SQLite connections closed")
+    logging.info("Redis + MySQL connections closed")
 
 
 app = FastAPI(title="Agent Intelligent Assistant", version="1.0.0", lifespan=lifespan)

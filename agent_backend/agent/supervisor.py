@@ -17,8 +17,24 @@ async def supervisor_node(state: MultiAgentState) -> dict:
 
     Reads: intent, handoff_to, messages
     Sets: next_agent, supervisor_reason, current_agent
+
+    Short-circuits for obvious chitchat (no handoff) to save an LLM call.
     """
-    llm = create_llm()
+    intent = state.get("intent", "chitchat")
+    handoff_to = state.get("handoff_to", "")
+
+    # Short-circuit: obvious chitchat without handoff — skip LLM
+    if intent == "chitchat" and not handoff_to:
+        return {
+            "next_agent": "chitchat",
+            "supervisor_reason": "Fast path: intent is chitchat, no handoff",
+            "current_agent": "chitchat",
+            "handoff_to": "",
+            "handoff_reason": "",
+            "handoff_from": "",
+        }
+
+    llm = create_llm(fast=True)
 
     # Build context for supervisor
     context_lines = [

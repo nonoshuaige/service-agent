@@ -1,6 +1,6 @@
 from agent_backend.storage.db import (
     init_db,
-    get_db,
+    get_pool,
     close_db,
     save_message,
     save_messages_batch,

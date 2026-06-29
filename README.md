@@ -1,8 +1,8 @@
 # Service Agent
 
-校园活动票务智能助手，基于 FastAPI + LangGraph Supervisor + Redis + SQLite 的多 Agent 对话系统。
+校园活动票务智能助手，基于 FastAPI + LangGraph Supervisor + Redis + MySQL 的多 Agent 对话系统。
 
-> 版本：v1.5 | 最后更新：2026-06-27
+> 版本：v1.6 | 最后更新：2026-06-29
 
 ## 概述
 
@@ -13,8 +13,10 @@
 - **售前 Agent** — 搜索活动、购票下单、计算器
 - **售后 Agent** — 查询订单、票务政策FAQ、计算器
 - **Handoff 跨Agent协作** — 子Agent互相感知，可传递任务（回环保护）
-- **双层存储** — Redis 热数据缓存 + SQLite 全量持久化
+- **双层存储** — Redis 热数据缓存 + MySQL 全量持久化
+- **性能优化** — 关键词快速通道 + 快慢模型分离（路由/闲聊用 flash 模型）
 - **SSE 流式推送** — thinking / intent / route / tool_call / tool_result / final / done
+- **数据可靠** — Redis 热数据兜底恢复，MySQL 无数据时自动补齐
 
 ## 架构
 
@@ -28,7 +30,7 @@ FastAPI Agent 后端 (localhost:8000)
     │                                    │   handoff   │
     │                                    └─────────────┘
     ├── JWT 验证 → ContextVar → 工具层转发到 Spring Boot
-    ├── Redis 热数据 (7天TTL) + SQLite 全量持久化
+    ├── Redis 热数据 (7天TTL) + MySQL 全量持久化
     └── SSE 流式输出
     │
     ▼
@@ -59,9 +61,13 @@ pip install -r requirements.txt
 ```env
 LLM_PROVIDER=zhipu
 ZHIPU_API_KEY=your-api-key
+ZHIPU_MODEL=glm-4.5-air
 JWT_SECRET=与SpringBoot共享的密钥
 REDIS_URL=redis://localhost:6379/0
-DB_PATH=agent.db
+MYSQL_HOST=localhost
+MYSQL_USER=root
+MYSQL_PASSWORD=123456
+MYSQL_DATABASE=agent_db
 ```
 
 ### 启动
@@ -142,7 +148,7 @@ agent_backend/
 │       ├── pre_sales.py     # 售前 Agent
 │       └── after_sales.py   # 售后 Agent
 ├── tools/                   # 工具定义 + 注册表
-├── storage/                 # SQLite 持久化层
+├── storage/                 # MySQL 持久化层
 ├── context/                 # Redis 上下文中心
 ├── models/                  # Pydantic 请求/响应模型
 └── utils/                   # Redis 客户端 + SSE 工具
@@ -156,7 +162,7 @@ agent_backend/
 | LangGraph | Supervisor 多 Agent 编排 |
 | LangChain + langchain-openai | LLM 抽象 + 工具定义 |
 | Redis | 热数据缓存（全 Key 7 天 TTL） |
-| SQLite (aiosqlite) | 全量消息持久化 + 压缩记录 |
+| MySQL (aiomysql) | 全量消息持久化 + 压缩记录 |
 | SSE | 流式推送 |
 | python-jose | JWT 验证 |
 | httpx | 后端 API 调用 |

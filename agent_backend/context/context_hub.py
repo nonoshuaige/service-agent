@@ -158,14 +158,32 @@ async def set_active_session(user_id: str, session_id: str):
     await redis.expire(key, REDIS_TTL)
 
 
-async def load_session_messages(session_id: str, limit: int = DEFAULT_RECENT_LIMIT) -> dict:
+async def load_session_messages(session_id: str, limit: int = DEFAULT_RECENT_LIMIT,
+                                user_id: str = "") -> dict:
     """Load recent messages for initial display, with pagination info.
+
+    Falls back to Redis hot data when MySQL is empty for this session.
 
     Returns:
         {messages: list, total: int, oldest_seq: int, has_more: bool}
     """
     total = await get_message_count(session_id)
     messages = await get_recent_messages(session_id, limit)
+
+    if total == 0 and user_id:
+        # MySQL empty — try recovering from Redis hot data
+        from agent_backend.storage.db import save_message as _save_msg
+        redis_msgs = await get_recent(user_id, session_id, count=50)
+        recovered = 0
+        for i, m in enumerate(redis_msgs):
+            if m.get("role") in ("user", "assistant"):
+                await _save_msg(user_id, session_id, m["role"], m["content"], i)
+                recovered += 1
+        if recovered:
+            logger.info(f"Recovered {recovered} messages from Redis for {session_id}")
+            total = await get_message_count(session_id)
+            messages = await get_recent_messages(session_id, limit)
+
     oldest_seq = messages[0]["sequence_num"] if messages else 0
     return {
         "messages": [{"role": m["role"], "content": m["content"]} for m in messages],

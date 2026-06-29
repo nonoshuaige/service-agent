@@ -13,4 +13,5 @@ async def chitchat_agent_node(state: MultiAgentState) -> dict:
         tools=[],
         system_prompt=CHITCHAT_PROMPT,
         max_iterations=1,
+        fast=True,
     )

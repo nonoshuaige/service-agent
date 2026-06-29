@@ -23,8 +23,12 @@ class Settings(BaseSettings):
     # Service
     agent_port: int = 8000
 
-    # Database
-    db_path: str = "agent.db"
+    # MySQL
+    mysql_host: str = "localhost"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = "123456"
+    mysql_database: str = "agent_db"
 
     # External
     ticket_backend_url: str = "http://localhost:8080"

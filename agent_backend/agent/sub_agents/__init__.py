@@ -15,6 +15,7 @@ async def _run_agent_loop(
     tools: list,
     system_prompt: str,
     max_iterations: int = 5,
+    fast: bool = False,
 ) -> dict:
     """Shared tool-calling loop for sub-agents.
 
@@ -26,7 +27,7 @@ async def _run_agent_loop(
         dict with keys: messages, handoff_to, handoff_reason,
                         handoff_from, current_agent
     """
-    llm = create_llm()
+    llm = create_llm(fast=fast)
     llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     # Build LLM input (system prompt is NOT persisted to state messages)

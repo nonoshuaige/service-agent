@@ -11,17 +11,24 @@ from agent_backend.config import settings
 logger = logging.getLogger(__name__)
 
 
-def create_llm(provider: str | None = None) -> ChatOpenAI:
-    """Create a ChatOpenAI instance for the configured or given provider."""
+def create_llm(provider: str | None = None, fast: bool = False) -> ChatOpenAI:
+    """Create a ChatOpenAI instance for the configured or given provider.
+
+    Args:
+        provider: LLM provider name (zhipu/deepseek). None = use settings.
+        fast: If True, use the summary model (glm-4-flash) for low-latency tasks.
+    """
     provider = provider or settings.llm_provider
+    model = settings.summary_model if fast else settings.zhipu_model
 
     if provider == "zhipu":
         return ChatOpenAI(
-            model=settings.zhipu_model,
+            model=model,
             api_key=settings.zhipu_api_key,
             base_url=settings.zhipu_base_url,
             temperature=0.7,
-            streaming=True,
+            streaming=False,
+            request_timeout=30,
         )
     elif provider == "deepseek":
         return ChatOpenAI(
@@ -29,7 +36,8 @@ def create_llm(provider: str | None = None) -> ChatOpenAI:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             temperature=0.7,
-            streaming=True,
+            streaming=False,
+            request_timeout=30,
         )
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

@@ -12,12 +12,49 @@ from agent_backend.agent.state import MultiAgentState
 logger = logging.getLogger(__name__)
 
 
+# Quick keyword sets for fast-path intent (skip LLM)
+_GREETING_WORDS = {"你好", "嗨", "在吗", "hello", "hi", "嘿", "早", "晚上好", "早上好", "下午好", "在不在", "哈喽"}
+_SELF_INTRO_WORDS = {"你是谁", "你叫什么", "你的名字", "你能干嘛", "你能做什么", "你有什么功能", "介绍一下", "自我介绍"}
+
+
+def _fast_path_intent(text: str) -> str | None:
+    """Return intent if obvious from keywords, else None (need LLM)."""
+    t = text.strip().lower()
+    for w in _GREETING_WORDS:
+        if t == w or t.startswith(w):
+            return "chitchat"
+    for w in _SELF_INTRO_WORDS:
+        if w in t:
+            return "chitchat"
+    # Pre/after sales keywords → still need LLM for accuracy
+    pre_kw = ["活动", "演出", "晚会", "买票", "购票", "下单", "场馆", "票价", "推荐", "热卖", "搜索"]
+    after_kw = ["订单", "退款", "退票", "售后", "投诉", "购票记录", "我的票", "我的订单", "改签"]
+    if any(kw in t for kw in pre_kw):
+        return "pre_sales"
+    if any(kw in t for kw in after_kw):
+        return "after_sales"
+    return None
+
+
 async def rewrite_intent_node(state: MultiAgentState) -> dict:
     """Rewrite user query and classify intent via a single structured LLM call.
 
     Sets: rewritten_query, intent, intent_reason
+
+    Uses keyword fast-path for obvious intents to skip LLM.
     """
-    llm = create_llm()
+    user_query = state.get("user_query", "")
+
+    # Fast path: obvious intent from keywords
+    fast = _fast_path_intent(user_query)
+    if fast and fast == "chitchat":
+        return {
+            "rewritten_query": user_query,
+            "intent": "chitchat",
+            "intent_reason": "Fast path: obvious greeting/chitchat",
+        }
+
+    llm = create_llm(fast=True)
 
     messages = [
         SystemMessage(content=REWRITE_INTENT_PROMPT),

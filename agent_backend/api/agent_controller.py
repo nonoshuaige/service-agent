@@ -89,7 +89,7 @@ async def session_detail(session_id: str, user_id: str = Depends(get_current_use
     detail = await get_session_detail(session_id)
     if not detail:
         raise HTTPException(status_code=404, detail="Session not found")
-    data = await load_session_messages(session_id)
+    data = await load_session_messages(session_id, user_id=user_id)
     detail.update(data)
     await set_active_session(user_id, session_id)
     return ApiResponse.success(data=detail)
