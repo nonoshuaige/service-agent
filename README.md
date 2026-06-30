@@ -2,19 +2,18 @@
 
 校园活动票务智能助手，基于 FastAPI + LangGraph Supervisor + Redis + MySQL 的多 Agent 对话系统。
 
-> 版本：v1.6 | 最后更新：2026-06-29
+> 版本：v1.7 | 最后更新：2026-06-30
 
 ## 概述
 
-在现有校园活动票务系统（Spring Boot + Vue 3）基础上，基于 LangGraph StateGraph 构建 **Supervisor 多 Agent 架构**：
+在现有校园活动票务系统（Spring Boot + Vue 3）基础上，基于 LangGraph StateGraph 构建 **Router 多 Agent 架构**（3 Agent）：
 
-- **意图识别** — LLM 改写查询 + 自动分类意图（闲聊 / 售前 / 售后）
-- **Supervisor 路由** — LLM 调度器决定由哪个子 Agent 处理
-- **售前 Agent** — 搜索活动、购票下单、计算器
+- **Router Agent** — 单一 Agent 同时完成改写查询 + 意图分类 + 闲聊回复 + 路由调度（单次 LLM）
+- **售前 Agent** — 搜索活动（内置 event 表 schema）、购票下单、计算器
 - **售后 Agent** — 查询订单、票务政策FAQ、计算器
-- **Handoff 跨Agent协作** — 子Agent互相感知，可传递任务（回环保护）
+- **Handoff 跨Agent协作** — 子Agent互相感知，可传递任务（handoff 路由 0 LLM）
 - **双层存储** — Redis 热数据缓存 + MySQL 全量持久化
-- **性能优化** — 关键词快速通道 + 快慢模型分离（路由/闲聊用 flash 模型）
+- **性能优化** — 问候语快速通道（0 LLM）+ 快慢模型分离（Router 用 flash，子Agent 用完整模型）
 - **SSE 流式推送** — thinking / intent / route / tool_call / tool_result / final / done
 - **数据可靠** — Redis 热数据兜底恢复，MySQL 无数据时自动补齐
 
@@ -26,9 +25,9 @@ Vue 3 前端 (localhost:5173)
     ▼
 FastAPI Agent 后端 (localhost:8000)
     │
-    ├── rewrite_intent → supervisor → chitchat | pre_sales | after_sales
-    │                                    │   handoff   │
-    │                                    └─────────────┘
+    ├── router (rewrite+intent+chitchat+routing) → pre_sales | after_sales
+    │                                               │  handoff  │
+    │                                               └───────────┘
     ├── JWT 验证 → ContextVar → 工具层转发到 Spring Boot
     ├── Redis 热数据 (7天TTL) + MySQL 全量持久化
     └── SSE 流式输出
@@ -123,8 +122,8 @@ curl -X POST http://localhost:8000/api/v1/agent/chat/stream \
 
 | Agent | 工具 |
 |-------|------|
-| chitchat（闲聊） | 无 |
-| pre_sales（售前） | search_events, create_order, calculator |
+| router（路由 + 闲聊） | 无（纯 LLM 决策，闲聊直接回复） |
+| pre_sales（售前） | search_events (含event表schema), create_order, calculator |
 | after_sales（售后） | query_my_orders, calculator |
 
 ## 项目结构
@@ -135,16 +134,15 @@ agent_backend/
 ├── config.py                # 配置管理
 ├── api/                     # HTTP 层（路由 + JWT 依赖注入）
 ├── auth/                    # JWT 验证 + token 传播
-├── agent/                   # Supervisor 多 Agent 核心
+├── agent/                   # Router 多 Agent 核心
 │   ├── state.py             # MultiAgentState 定义
-│   ├── graph.py             # LangGraph StateGraph 编排
+│   ├── graph.py             # LangGraph StateGraph 编排 (v1.7: 3节点)
+│   ├── router.py            # ★ Router Agent — 合并 rewrite+intent+chitchat+supervisor
 │   ├── nodes.py             # LLM 工厂
-│   ├── prompts.py           # System Prompt 模板
-│   ├── intents.py           # 意图识别节点
-│   ├── supervisor.py        # LLM 路由调度节点
+│   ├── prompts.py           # System Prompt 模板 (v1.7: 3个)
 │   ├── handoff.py           # handoff 工具 + router
+│   ├── prompt_builder.py    # build_messages 工具函数 (legacy)
 │   └── sub_agents/          # 子Agent实现
-│       ├── chitchat.py      # 闲聊 Agent
 │       ├── pre_sales.py     # 售前 Agent
 │       └── after_sales.py   # 售后 Agent
 ├── tools/                   # 工具定义 + 注册表
@@ -159,7 +157,7 @@ agent_backend/
 | 组件 | 用途 |
 |------|------|
 | FastAPI | Web 框架 |
-| LangGraph | Supervisor 多 Agent 编排 |
+| LangGraph | Supervisor → Router 多 Agent 编排 |
 | LangChain + langchain-openai | LLM 抽象 + 工具定义 |
 | Redis | 热数据缓存（全 Key 7 天 TTL） |
 | MySQL (aiomysql) | 全量消息持久化 + 压缩记录 |

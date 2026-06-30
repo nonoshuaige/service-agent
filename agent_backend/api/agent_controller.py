@@ -144,8 +144,8 @@ async def chat_stream(req: ChatStreamReq, user_id: str = Depends(get_current_use
                 elif role == "system":
                     initial_messages.append(HumanMessage(content=m["content"]))
 
-            # Current user message
-            initial_messages.append(HumanMessage(content=req.message))
+            # Current user message is NOT added to messages here.
+            # The router node will add it (rewritten if needed) to state.messages.
 
             initial_state: MultiAgentState = {
                 "messages": initial_messages,
@@ -177,24 +177,29 @@ async def chat_stream(req: ChatStreamReq, user_id: str = Depends(get_current_use
                 node_name = next(iter(chunk))
                 update = chunk[node_name]
 
-                if node_name == "rewrite_intent":
+                if node_name == "router":
                     intent = update.get("intent", "unknown")
                     rewritten = update.get("rewritten_query", "")
+                    next_agent = update.get("next_agent", "unknown")
                     yield sse_event("thinking", {
                         "step": "intent",
                         "content": f"识别意图: {intent}",
                         "intent": intent,
                         "rewritten_query": rewritten,
                     })
+                    if intent != "chitchat" and next_agent != "finish":
+                        yield sse_event("thinking", {
+                            "step": "route",
+                            "content": f"调度到: {next_agent}",
+                        })
+                    # If chitchat, the router's AIMessage is the final reply
+                    new_msgs = update.get("messages", [])
+                    for msg in new_msgs:
+                        if isinstance(msg, AIMessage) and msg.content:
+                            final_text = str(msg.content)
+                            final_agent = "chitchat"
 
-                elif node_name == "supervisor":
-                    next_agent = update.get("next_agent", "unknown")
-                    yield sse_event("thinking", {
-                        "step": "route",
-                        "content": f"调度到: {next_agent}",
-                    })
-
-                elif node_name in ("chitchat_agent", "pre_sales_agent", "after_sales_agent"):
+                elif node_name in ("pre_sales_agent", "after_sales_agent"):
                     final_agent = node_name.replace("_agent", "")
                     new_msgs = update.get("messages", [])
 

@@ -13,22 +13,58 @@ def _auth_headers() -> dict:
 
 
 @tool
-async def search_events(keyword: str = "") -> str:
-    """搜索校园活动。当用户询问有什么活动、演出、晚会、比赛、热卖、推荐时调用。
-    获取的是当前所有可购票的活动列表，然后按关键词筛选。
+async def search_events(
+    keyword: str = "",
+    status: int | None = None,
+    page: int = 1,
+    page_size: int = 8,
+) -> str:
+    """搜索校园活动。数据库 event 表存储所有活动，后端按时间窗口自动过滤。
 
-    重要：keyword 必须是具体的活动名称关键词（如"毕业晚会"、"歌手大赛"），
-    不能是抽象概念（如"热卖"、"热门"、"推荐"、"好看的"）。
-    如果用户想找热门/推荐/热卖的活动，传 keyword="" 获取全部活动，再从中介绍即可。
+    ## event 表字段
+    字段              | 类型          | 说明
+    event_id          | BIGINT        | 活动ID
+    title             | VARCHAR(100)  | 活动标题，keyword 对此字段模糊匹配
+    description       | TEXT          | 活动描述
+    organizer         | VARCHAR(100)  | 主办方
+    venue             | VARCHAR(100)  | 场地
+    poster_url        | VARCHAR(255)  | 海报URL
+    sale_start_time   | DATETIME      | 开售时间
+    sale_end_time     | DATETIME      | 停售时间
+    event_start_time  | DATETIME      | 活动开始时间
+    event_end_time    | DATETIME      | 活动结束时间
+    status            | TINYINT       | 活动状态
+    minPrice          | DECIMAL       | 最低票价（从 ticket_category 表自动计算）
+
+    ## status 枚举（后端按时间窗口自动过滤）
+    - 0 = 预热中：sale_start_time > 当前时间（尚未开售）
+    - 1 = 售票中：sale_start_time <= 当前时间 < sale_end_time（热卖中 / 正在售票）
+    - 2 = 已结束
+    - 3 = 已下架
+
+    ## 关键词 → 参数映射规则
+    | 用户说法 | 参数 |
+    |---------|------|
+    | "热卖" / "现在有什么活动" / "正在售票" / "能买票的活动" | status=1 |
+    | "即将开始" / "即将开售" / "预售" / "预热" | status=0 |
+    | 具体活动名称如"毕业晚会" / "十佳歌手" | keyword="毕业晚会" |
+    | "推荐" / "好看的" / "有什么好看的"（无具体名称） | keyword="" 且 status=1 |
 
     Args:
-        keyword: 活动名称关键词，留空则返回全部活动。"毕业晚会"、"歌手大赛"等具体词。
+        keyword: 活动标题关键词，空字符串则不按标题筛选
+        status: 活动状态。1=售票中, 0=预热中, None=全部
+        page: 页码
+        page_size: 每页条数
     """
     async with httpx.AsyncClient() as client:
         try:
+            params = {"page": page, "pageSize": page_size}
+            if status is not None:
+                params["status"] = status
+
             resp = await client.get(
                 f"{settings.ticket_backend_url}/api/v1/event/list",
-                params={"page": 1, "pageSize": 5},
+                params=params,
                 headers=_auth_headers(),
                 timeout=10.0,
             )
@@ -45,7 +81,9 @@ async def search_events(keyword: str = "") -> str:
 
             return "\n".join(
                 f"- {e.get('title', '未知')} | {e.get('venue', '未知')} | "
-                f"¥{e.get('minPrice', '?')}起 | {e.get('saleStartTime', '未知')}"
+                f"¥{e.get('minPrice', '?')}起 | "
+                f"开售: {e.get('saleStartTime', '?')} | 停售: {e.get('saleEndTime', '?')} | "
+                f"活动时间: {e.get('eventStartTime', '?')}"
                 for e in events
             )
         except Exception as e:
